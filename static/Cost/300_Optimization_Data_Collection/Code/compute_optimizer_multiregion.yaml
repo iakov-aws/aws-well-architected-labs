@@ -2,10 +2,6 @@ AWSTemplateFormatVersion: 2010-09-09
 
 Description: Retrieves AWS Compute Optimizer information from across an organization
 Parameters:
-  # DatabaseName:
-  #   Type: String
-  #   Description: Name of the Athena database to be created to hold lambda information
-  #   Default: optimization_data
   Prefix:
     Type: String
     Description: Service which the data collector is looking at
@@ -27,26 +23,11 @@ Parameters:
     Type: String
     Description: ARN of the IAM role deployed in the management accounts which can retrieve lambda data.
     Default: "arn:aws:iam::597214020902:role/WA-Lambda-Assume-Role-Management-Account"
-  # CFDataName:
-  #   Type: String
-  #   Description: The name of what this cf is doing.
-  #   Default: ComputeOptimizer
   Schedule:
     Type: String
     Description: Cron job to trigger the lambda using cloudwatch event
     Default: "rate(14 days)"
-  # DestinationBucketARN:
-  #   Type: String
-  #   Description: ARN of the S3 Bucket that exists or needs to be created to hold rightsizing information
-  # GlueRoleARN:
-  #   Type: String
-  # S3CrawlerQue:
-  #   Type: String
-  #   Description: SQS that will be used to trigger the crawler lambda to pull data in
-  # RolePrefix:
-  #   Type: String
-  #   Description: This prefix will be placed in front of all roles created. Note you may wish to add a dash at the end to make more readable
-
+ 
 Resources:
   RoleManageComputeOptBuckets:
     Type: AWS::IAM::Role
@@ -428,21 +409,3 @@ Resources:
       Principal: events.amazonaws.com
       SourceAccount: !Ref 'AWS::AccountId'
       SourceArn: !GetAtt CloudWatchTrigger.Arn
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
