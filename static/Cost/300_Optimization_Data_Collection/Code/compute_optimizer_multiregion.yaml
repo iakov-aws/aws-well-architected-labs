@@ -107,7 +107,7 @@ Resources:
 
           def lambda_handler(event, context):
               log(event)
-              # set global vars from ressource properties
+              # set global vars from cloud formation resource properties
               for p in "PREFIX REPL_ROLE_PATTERN BUCKET_PATTERN BUCKET_POLICY ROLE_POLICY REPL_CONF ROLE REGIONS".split(' '):
                   globals()[p] = event['ResourceProperties'][p].replace('}','}}').replace('{','{{').replace('$(','{').replace(')','}')
               globals()['regions']=[r.strip() for r in REGIONS.split(',')]
@@ -181,6 +181,7 @@ Resources:
               for region in regions:
                   bkt=BUCKET_PATTERN.format(prefix=prefix, acc=acc, region=region).lower()
                   delete_bucket(bkt)
+                  # FIXME: to clean up the role we need to detach policies first
                   try:iam.delete_role(RoleName=REPL_ROLE_PATTERN.format(**locals(), **globals()))
                   except Exception as e: log(e)
               return True, "deleted"
