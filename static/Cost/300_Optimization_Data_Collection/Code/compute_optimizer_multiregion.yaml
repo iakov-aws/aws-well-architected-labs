@@ -1,0 +1,447 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Description: Retrieves AWS Compute Optimizer information from across an organization
+Parameters:
+  # DatabaseName:
+  #   Type: String
+  #   Description: Name of the Athena database to be created to hold lambda information
+  #   Default: optimization_data
+  Prefix:
+    Type: String
+    Description: Service which the data collector is looking at
+    Default: COC081
+  DestinationBucketPattern:
+    Type: String
+    Description: Name of the S3 Bucket to be created to hold data information. Region name will be added. You can use variables $(acc) = payer account, $(region) - region 
+    #AllowedPattern: (?=^.{3,63}$)(?!^(\d+\.)+\d+$)(^(([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])\.)*([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])$)
+    Default: "$(prefix)-$(acc)-$(region)"
+  ReplicationRoleNamePattern:
+    Type: String
+    Description: Name of Replication Role for s3 buckets. You can use variables $(acc) = payer account, $(region) - region 
+    #AllowedPattern: (?=^.{3,63}$)(?!^(\d+\.)+\d+$)(^(([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])\.)*([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])$)
+    Default: "$(prefix)-S3ReplicationRole-$(region)"
+  Regions:
+    Type: String
+    Description: Comma separated list of regions. All data will be aggregated to a bucket in the First region in this list.
+  RoleNameARN:
+    Type: String
+    Description: ARN of the IAM role deployed in the management accounts which can retrieve lambda data.
+    Default: "arn:aws:iam::597214020902:role/WA-Lambda-Assume-Role-Management-Account"
+  # CFDataName:
+  #   Type: String
+  #   Description: The name of what this cf is doing.
+  #   Default: ComputeOptimizer
+  Schedule:
+    Type: String
+    Description: Cron job to trigger the lambda using cloudwatch event
+    Default: "rate(14 days)"
+  # DestinationBucketARN:
+  #   Type: String
+  #   Description: ARN of the S3 Bucket that exists or needs to be created to hold rightsizing information
+  # GlueRoleARN:
+  #   Type: String
+  # S3CrawlerQue:
+  #   Type: String
+  #   Description: SQS that will be used to trigger the crawler lambda to pull data in
+  # RolePrefix:
+  #   Type: String
+  #   Description: This prefix will be placed in front of all roles created. Note you may wish to add a dash at the end to make more readable
+
+Resources:
+  RoleManageComputeOptBuckets:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: "/"
+      Policies:
+        - PolicyName: PolicyManageComputeOptBuckets
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                - "iam:*"
+                - "s3:*"
+                - "sts:GetCallerIdentity"
+                Resource: "*"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  LambdaManageComputeOptBuckets:
+    Type: AWS::Lambda::Function
+    DependsOn: 
+      - RoleManageComputeOptBuckets
+    Properties:
+      Role: !GetAtt RoleManageComputeOptBuckets.Arn 
+      Environment:
+        Variables:
+          RDS_HOST: ''
+          RDS_USERNAME: ''
+      Runtime: python3.8
+      Handler: index.lambda_handler
+      Timeout: 900
+      Code:
+        ZipFile: |
+          import os
+          import time
+          import uuid
+          import json
+          import time
+          import boto3
+          import botocore
+          import logging
+          import cfnresponse
+
+          log=print
+          acc=boto3.client("sts").get_caller_identity()["Account"]
+          s3=boto3.client('s3')
+          iam=boto3.client('iam')
+
+          def lambda_handler(event, context):
+              log(event)
+              # set global vars from ressource properties
+              for p in "PREFIX REPL_ROLE_PATTERN BUCKET_PATTERN BUCKET_POLICY ROLE_POLICY REPL_CONF ROLE REGIONS".split(' '):
+                  globals()[p] = event['ResourceProperties'][p].replace('}','}}').replace('{','{{').replace('$(','{').replace(')','}')
+              globals()['regions']=[r.strip() for r in REGIONS.split(',')]
+              globals()['prefix']=PREFIX
+              globals()['BUCKET_PATTERN']=BUCKET_PATTERN.lower()
+              log(f"Cloud formation {event['RequestType']}, {BUCKET_PATTERN}")
+
+              if event['RequestType'] in ['Create', 'Update']: res=create_all()
+              elif event['RequestType'] == 'Delete': res=delete_all()
+              else: res=(False, "Unknown operation: "+event['RequestType'])
+              response_data={'Reason': res[1], 'uuid': str(uuid.uuid1()) }  
+              cfnresponse.send(event, context, cfnresponse.SUCCESS if res[0] else cfnresponse.FAILED, response_data, event.get('PhysicalResourceId', None) or str(uuid.uuid1()))
+
+          def bucket_exists(bkt):
+              try:
+                  boto3.resource('s3').meta.client.head_bucket(Bucket=bkt)
+              except botocore.exceptions.ClientError as e:
+                  if int(e.response['Error']['Code']) == 404: # FIXME: metadata still exists when bucket was just deleted
+                      log(f"{bkt} Does Not Exist!")
+                      return False
+              return True
+
+          def create_bucket(bkt, region):
+              if bucket_exists(bkt): return True
+              b={'Bucket':bkt}
+              if region != regions[0]:
+                  b['CreateBucketConfiguration']={'LocationConstraint': region}
+              boto3.resource('s3', region_name=region).create_bucket(**b)
+              log(f"{bkt} Created in {region}")
+              return True
+
+          def set_replication(src, dst, region, prfx=""):
+              log(f'Set {src} -> {dst} ')
+              r_name=REPL_ROLE_PATTERN.format(**locals(),**globals())
+              del_role(r_name)
+              try: iam.create_role(RoleName=r_name, AssumeRolePolicyDocument=ROLE.format(**locals(), **globals()))
+              except: pass
+              iam.put_role_policy(RoleName=r_name, PolicyName='Policy' + r_name, PolicyDocument=ROLE_POLICY.format(**locals(), **globals()))
+              for b in src, dst:
+                  s3.put_bucket_versioning(Bucket=b, VersioningConfiguration={'Status': 'Enabled'})
+              time.sleep(3) # give time to versioning to apply
+              s3.put_bucket_replication(Bucket=src, ReplicationConfiguration=json.loads(REPL_CONF.format(**locals(), **globals())))
+
+          def del_role(role):
+              try: iam.delete_role(RoleName=r_name)
+              except: pass
+
+          def delete_bucket(bkt):
+              if bucket_exists(bkt):
+                  b=boto3.resource('s3').Bucket(bkt)
+                  try: b.object_versions.delete()
+                  except: pass
+                  try: b.delete()
+                  except: pass
+                  log(f"{bkt} deleted")
+
+          def create_all():
+              master_bkt = None
+              for region in regions:
+                  bkt=BUCKET_PATTERN.format(prefix=prefix, acc=acc, region=region).lower()
+                  create_bucket(bkt, region=region)
+                  s3.put_bucket_policy(Bucket=bkt, Policy=BUCKET_POLICY.format(**locals(), **globals()))
+                  if region == regions[0]:
+                      master_bkt = bkt
+                  else:
+                      set_replication(bkt, master_bkt, region, prfx="")
+              #TODO: the first trigger here ?
+              return True, "created"
+
+          def delete_all():
+              for region in regions:
+                  bkt=BUCKET_PATTERN.format(prefix=prefix, acc=acc, region=region).lower()
+                  delete_bucket(bkt)
+                  try:iam.delete_role(RoleName=REPL_ROLE_PATTERN.format(**locals(), **globals()))
+                  except Exception as e: log(e)
+              return True, "deleted"
+
+  ComputeOptBuckets:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt LambdaManageComputeOptBuckets.Arn
+      REGIONS: 'us-east-1,eu-west-1,us-west-1'
+      PREFIX: !Ref Prefix
+      REPL_ROLE_PATTERN: !Ref ReplicationRoleNamePattern
+      BUCKET_PATTERN: !Ref DestinationBucketPattern
+      BUCKET_POLICY: |
+         {
+            "Version":"2012-10-17",
+            "Statement":[
+              {
+                 "Effect":"Allow",
+                 "Principal":{
+                    "Service":"compute-optimizer.amazonaws.com"
+                 },
+                 "Action":[
+                    "s3:GetBucketAcl",
+                    "s3:GetBucketPolicyStatus"
+                 ],
+                 "Resource":"arn:aws:s3:::$(bkt)"
+              },
+              {
+                 "Effect":"Allow",
+                 "Principal":{
+                    "Service":"compute-optimizer.amazonaws.com"
+                 },
+                 "Action":"s3:PutObject",
+                 "Resource":"arn:aws:s3:::$(bkt)/*",
+                 "Condition":{
+                    "StringEquals":{
+                       "aws:SourceAccount":"$(acc)",
+                       "aws:SourceArn":"arn:aws:compute-optimizer:$(region):$(acc):*"
+                    }
+                 }
+              }
+            ]
+          }
+
+      ROLE_POLICY: |
+          {
+             "Version":"2012-10-17",
+             "Statement":[
+                {
+                   "Effect":"Allow",
+                   "Action":[
+                      "s3:GetObjectVersionForReplication",
+                      "s3:GetObjectVersionAcl"
+                   ],
+                   "Resource":[
+                      "arn:aws:s3:::$(src)/*"
+                   ]
+                },
+                {
+                   "Effect":"Allow",
+                   "Action":[
+                      "s3:ListBucket",
+                      "s3:GetReplicationConfiguration"
+                   ],
+                   "Resource":[
+                      "arn:aws:s3:::$(src)"
+                   ]
+                },
+                {
+                   "Effect":"Allow",
+                   "Action":[
+                      "s3:ReplicateObject",
+                      "s3:ReplicateDelete",
+                      "s3:ReplicateTags",
+                      "s3:GetObjectVersionTagging"
+                   ],
+                   "Resource":"arn:aws:s3:::$(dst)/*"
+                }
+             ]
+          }
+
+      ROLE: |
+          {
+             "Version":"2012-10-17",
+             "Statement":[
+                {
+                   "Effect":"Allow",
+                   "Principal":{
+                      "Service":"s3.amazonaws.com"
+                   },
+                   "Action":"sts:AssumeRole"
+                }
+             ]
+          }
+
+      REPL_CONF: |
+          {
+             "Role":"arn:aws:iam::$(acc):role/$(r_name)",
+             "Rules":[
+                {
+                   "Status":"Enabled",
+                   "Priority":1,
+                   "DeleteMarkerReplication":{
+                      "Status":"Enabled"
+                   },
+                   "Filter":{
+                      "Prefix":""
+                   },
+                   "Destination":{
+                      "Bucket": "arn:aws:s3:::$(dst)"
+                   }
+                }
+             ]
+          }
+
+  LambdaTriggerExportRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Prefix}-Lambda-Role"
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+        Version: 2012-10-17
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSLambdaExecute
+      Path: /
+      Policies:
+        - PolicyName: !Sub "Assume-Management-Compute_Optimizer-Account-Role"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action: "sts:AssumeRole"
+                Resource:
+                  "*"
+        - PolicyName: "data"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action: 
+                - "compute-optimizer:*"
+                - "sts:GetCallerIdentity"
+                Resource: "*"
+
+  LambdaTriggerExport:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${Prefix}-Lambda-Function"
+      Description: !Sub "LambdaFunction to retrieve Compute_Optimizer"
+      Handler: index.lambda_handler
+      Runtime: python3.8
+      MemorySize: 2688
+      Timeout: 300
+      Role:
+        Fn::GetAtt:
+          - LambdaTriggerExportRole
+          - Arn
+      Environment:
+        Variables:
+          REGIONS:
+            Ref: Regions
+          BUCKET_PATTERN:
+            Ref: DestinationBucketPattern
+          ROLE_ARN:
+            Ref: RoleNameARN
+          INCLUDE_MEMBER_ACCOUNTS: 'TRUE'
+          PREFIX:
+            Ref: Prefix
+      Code:
+        ZipFile: |
+          import os
+          import boto3
+          from datetime import date
+
+          BUCKET_PATTERN = os.environ["BUCKET_PATTERN"]
+          INCLUDE_MEMBER_ACCOUNTS = os.environ.get("INCLUDE_MEMBER_ACCOUNTS", 'TRUE').lower() == 'true'
+          REGIONS = os.environ["REGIONS"]
+          prefix = os.environ["PREFIX"]
+          regions = [r.strip() for r in REGIONS.split(',')]
+          ROLE_ARN = os.environ['ROLE_ARN']
+
+          def lambda_handler(event, context):
+              today = date.today()
+              year = today.year
+              month = today.month
+
+              sts_connection = boto3.client('sts')
+              acct_b = sts_connection.assume_role(RoleArn=ROLE_ARN, RoleSessionName="cross_acct_lambda")
+                     
+              account_b_creds = {
+                "aws_access_key_id":     acct_b['Credentials']['AccessKeyId'],
+                "aws_secret_access_key": acct_b['Credentials']['SecretAccessKey'],
+                "aws_session_token":     acct_b['Credentials']['SessionToken'],
+              }
+
+              acc = boto3.client("sts", **account_b_creds).get_caller_identity()["Account"]
+              globals()['BUCKET_PATTERN']=BUCKET_PATTERN.format(**locals(), **globals())               < here
+          
+              for region in regions:
+                  # create service client using the assumed role credentials
+                  co = boto3.client("compute-optimizer", region_name=region, **account_b_creds)
+                  export_funcs = {
+                      'ec2_instance': co.export_ec2_instance_recommendations,
+                      'auto_scale':   co.export_auto_scaling_group_recommendations,
+                      'lambda':       co.export_lambda_function_recommendations,
+                      'ebs_volume':   co.export_ebs_volume_recommendations,
+                  }
+                  bkt = BUCKET_PATTERN.format(prefix=prefix, acc=acc, region=region).lower()
+
+                  for name, func in export_funcs.items():
+                      try:
+                          res = func(
+                              includeMemberAccounts=INCLUDE_MEMBER_ACCOUNTS, 
+                              s3DestinationConfig={'bucket': bkt, 'keyPrefix': f'Compute_Optimizer/Compute_Optimizer_{name}/year={year}/month={month}'}
+                          )
+                          print(f'{account_name} export queued. JobId: {res['jobId']}')
+                      except Exception as exc:
+                          print(f"ERROR: {name} - {exc}")
+
+  CloudWatchTrigger:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: !Sub "Scheduler-For-${Prefix}"
+      Name: !Sub "Scheduler-For-${Prefix}"
+      ScheduleExpression: !Ref Schedule
+      State: ENABLED
+      Targets:
+        - Arn:
+            Fn::GetAtt:
+              - LambdaTriggerExport
+              - Arn
+          Id: TriggerForGetAccounts
+  EventPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt LambdaTriggerExport.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceAccount: !Ref 'AWS::AccountId'
+      SourceArn: !GetAtt CloudWatchTrigger.Arn
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
