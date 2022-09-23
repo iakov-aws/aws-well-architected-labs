@@ -1,7 +1,7 @@
 ---
 title: "Cost & Usage Report Dashboards"
 #menutitle: "Lab #2"
-date: 2020-09-07T11:16:08-04:00
+date: 2022-08-30T11:16:08-04:00
 chapter: false
 weight: 1
 hidden: false
@@ -9,12 +9,17 @@ pre: "<b> </b>"
 ---
 ## Last Updated
 
-February 2022
+April 2022
 
 
 ## Feedback
 
 If you wish to provide feedback on this lab, there is an error, or you want to make a suggestion, please email: cloud-intelligence-dashboards@amazon.com
+
+## Get Help
+[Ask your questions](https://0s62bmu3aj.execute-api.us-east-1.amazonaws.com/PROD/link/tracker?LinkID=270894ed-12b6-27bc-74f3-124130ceb403&URL=https%3A%2F%2Frepost.aws%2Ftags%2FTANKNkVH-tSUa2jYNx4F159g%2Fcloud-intelligence-dashboards) on re:Post and get answers from our team, other AWS experts, and other customers using the dashboards. 
+
+[Subscribe to our YouTube channel](https://www.youtube.com/channel/UCl0O3ASMCwA_gw0QIKzoU3Q/) to see guides, tutorials, and walkthroughs on all things Cloud Intelligence Dashboards. 
 
 ## Introduction
 
@@ -58,7 +63,7 @@ Detailed permissions are shared in the next step
 
 - A QuickSight Enterprise license starts at $18 per month. 
 - Incremental costs associated with AWS Glue, Amazon Athena, and Amazon S3. 
-- Estimated total cost for all Dashboards together in a large AWS deployment is $54 per month. 
+- Estimated total cost for all Dashboards together in a large AWS deployment is $100 per month. 
 
 ## Time to complete
 
@@ -72,4 +77,4 @@ Approximately 45-60 minutes to onboard all CUR dashboards in this section manual
 Additional Dashboards include the **Data Transfer Dashboard** and **Trends Dashboard** 
 {{% /notice %}} 
 
-{{< prev_next_button link_next_url="../cost-usage-report-dashboards/dashboards/1_prerequistes/" button_next_text="Start Lab" first_step="true" />}}
+{{< prev_next_button link_next_url="../cost-usage-report-dashboards/dashboards/1a_prerequistes/" button_next_text="Start Lab" first_step="true" />}}
